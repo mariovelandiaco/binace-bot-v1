@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -10,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,8 +16,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	ui "github.com/gizak/termui/v3"
-	"github.com/gizak/termui/v3/widgets"
 	"github.com/gorilla/websocket"
 )
 
@@ -50,15 +46,14 @@ const (
 	// TARGETS AJUSTADOS - YA INCLUYEN MARGEN PARA COMISIONES
 	// Ganancia BRUTA = target, Ganancia NETA = target - 0.20%
 	microScalpTarget   = 0.003  // 0.30% bruto → 0.10% neto real
-	quickProfitTarget  = 0.004  // 0.40% bruto → 0.20% neto real
-	normalProfitTarget = 0.007  // 0.70% bruto → 0.50% neto real
 	maxProfitTarget    = 0.013  // 1.30% bruto → 1.10% neto real
-	
-	// STOP LOSS - Ajustados para PÉRDIDA REAL después de comisiones (0.20%)
-	// Fórmula: stopLoss = pérdidaRealDeseada - comisiónRoundTrip
-	microStopLoss   = 0.001  // 0.10% bruto → 0.30% pérdida REAL (0.10% + 0.20% com)
-	stopLossPercent = 0.003  // 0.30% bruto → 0.50% pérdida REAL (0.30% + 0.20% com)
-	trailingStop    = 0.001  // 0.10% bruto → 0.30% pérdida REAL (0.10% + 0.20% com)
+
+	// DEFAULTS CONFIGURABLES (se pueden cambiar desde web)
+	defaultQuickProfitTarget  = 0.004  // 0.40% bruto → 0.20% neto real
+	defaultNormalProfitTarget = 0.007  // 0.70% bruto → 0.50% neto real
+	defaultMicroStopLoss      = 0.001  // 0.10% bruto → 0.30% pérdida REAL
+	defaultStopLossPercent    = 0.003  // 0.30% bruto → 0.50% pérdida REAL
+	defaultTrailingStop       = 0.001  // 0.10% bruto → 0.30% pérdida REAL
 	
 	// GESTIÓN DE CAPITAL PRO (valores por defecto, se configuran al inicio)
 	defaultMinInvestUSDT   = 11.0  // Inversión mínima por defecto
@@ -110,13 +105,20 @@ var (
 	streamURL string
 	apiKey    string
 	secretKey string
-	
-	// Configuración del usuario (se pregunta al inicio)
-	totalInvestUSDT   float64 // Dinero total a invertir en este trade
-	investPerPosition float64 // Dinero por posición
-	maxPositions      int     // Número máximo de posiciones simultáneas
-	useStopLoss       bool    // ¿Usar estrategias de stop loss?
-	onlySellOnProfit  bool    // ¿Solo vender si hay ganancia?
+
+	// Configuración del usuario (se configura desde web)
+	totalInvestUSDT   = defaultMaxInvestUSDT   // Dinero total a invertir en este trade
+	investPerPosition = defaultMinInvestUSDT   // Dinero por posición
+	maxPositions      = defaultMaxPositions    // Número máximo de posiciones simultáneas
+	useStopLoss       = true                   // ¿Usar estrategias de stop loss?
+	onlySellOnProfit  = false                  // ¿Solo vender si hay ganancia?
+
+	// Targets y Stop Loss configurables (porcentajes)
+	quickProfitTarget  = defaultQuickProfitTarget  // 0.40% bruto → 0.20% neto
+	normalProfitTarget = defaultNormalProfitTarget // 0.70% bruto → 0.50% neto
+	microStopLoss      = defaultMicroStopLoss      // 0.10% bruto
+	stopLossPercent    = defaultStopLossPercent    // 0.30% bruto
+	trailingStop       = defaultTrailingStop       // 0.10% bruto
 )
 
 // ============================================================================
@@ -185,7 +187,30 @@ type Position struct {
 	StopLoss      float64
 	HighestPrice  float64 // Para trailing stop
 	BuyTime       time.Time
-	Strategy      string // "HFT", "SCALP", "SWING"
+	Strategy      string  // "HFT", "SCALP", "SWING"
+	BuyCommission float64 // Comisión pagada en la compra
+}
+
+type OrderResponse struct {
+	Symbol              string `json:"symbol"`
+	OrderID             int64  `json:"orderId"`
+	ClientOrderID       string `json:"clientOrderId"`
+	TransactTime        int64  `json:"transactTime"`
+	Price               string `json:"price"`
+	OrigQty             string `json:"origQty"`
+	ExecutedQty         string `json:"executedQty"`
+	CummulativeQuoteQty string `json:"cummulativeQuoteQty"`
+	Status              string `json:"status"`
+	Type                string `json:"type"`
+	Side                string `json:"side"`
+	Fills               []Fill `json:"fills"`
+}
+
+type Fill struct {
+	Price           string `json:"price"`
+	Qty             string `json:"qty"`
+	Commission      string `json:"commission"`
+	CommissionAsset string `json:"commissionAsset"`
 }
 
 type TradeSignal struct {
@@ -521,6 +546,31 @@ func getAccountBalance() error {
 	return nil
 }
 
+// startBalanceSync inicia la sincronización periódica del balance con Binance
+func startBalanceSync() {
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			// Solo sincronizar si el bot está corriendo
+			botRunningMutex.RLock()
+			running := botRunning
+			botRunningMutex.RUnlock()
+
+			if running {
+				if err := getAccountBalance(); err != nil {
+					// Solo logear errores críticos, no cada fallo menor
+					if time.Now().Unix()%60 == 0 { // Log cada minuto aprox
+						logMsg(fmt.Sprintf("⚠️  Error sincronizando balance: %v", err))
+					}
+				}
+			}
+		}
+	}()
+	logMsg("🔄 Sincronización automática del balance activada (cada 5s)")
+}
+
 func getExchangeInfo() ([]string, error) {
 	logMsg("Obteniendo pares USDT disponibles...")
 	
@@ -589,31 +639,35 @@ func executeUrgentTrade(job TradeJob) {
 		investAmount = math.Min(totalInvestUSDT, investPerPosition*1.5)
 	}
 	
-	logMsg(fmt.Sprintf("⚡ SEÑAL URGENTE %s | Conf:%.0f%% | Ejecutando...", 
+	logMsg(fmt.Sprintf("⚡ SEÑAL URGENTE %s | Conf:%.0f%% | Ejecutando...",
 		job.Symbol, job.Signal.Confidence))
-	
-	err := placeBuyOrder(job.Symbol, investAmount)
+
+	// CAMBIO: Recibir respuesta de la orden
+	orderResp, err := placeBuyOrder(job.Symbol, investAmount)
 	if err == nil {
-		quantity := investAmount / job.Price
-		
+		// CAMBIO: Usar datos REALES de Binance
+		executedQty, _ := strconv.ParseFloat(orderResp.ExecutedQty, 64)
+		avgPrice := calculateAvgPrice(orderResp.Fills)
+		buyCommission := calculateTotalCommission(orderResp.Fills)
+
 		pos := &Position{
-			Symbol:       job.Symbol,
-			BuyPrice:     job.Price,
-			Quantity:     quantity,
-			TargetPrice:  job.Price * (1 + microScalpTarget),
-			StopLoss:     job.Price * (1 - microStopLoss),
-			HighestPrice: job.Price,
-			BuyTime:      time.Now(),
-			Strategy:     "MICRO",
+			Symbol:        job.Symbol,
+			BuyPrice:      avgPrice,            // Precio real de ejecución
+			Quantity:      executedQty,         // Cantidad real ejecutada
+			TargetPrice:   avgPrice * (1 + microScalpTarget),
+			StopLoss:      avgPrice * (1 - microStopLoss),
+			HighestPrice:  avgPrice,
+			BuyTime:       time.Now(),
+			Strategy:      "MICRO",
+			BuyCommission: buyCommission,       // Comisión real de compra
 		}
-		
+
 		positionsMutex.Lock()
 		positions[job.Symbol] = pos
 		positionsMutex.Unlock()
-		
-		balanceMutex.Lock()
-		usdtBalance -= investAmount
-		balanceMutex.Unlock()
+
+		// CAMBIO: NO actualizar balance manualmente (Binance ya lo hizo)
+		// Removed: usdtBalance -= investAmount
 	}
 }
 
@@ -621,57 +675,142 @@ func processTradeJob(job TradeJob) {
 	analyzeTrendAndTrade(job.Symbol)
 }
 
-func placeBuyOrder(symbol string, usdtAmount float64) error {
+// ============================================================================
+// FUNCIONES AUXILIARES PARA PARSEAR RESPUESTAS DE BINANCE
+// ============================================================================
+
+// Calcular precio promedio de ejecución desde los fills
+func calculateAvgPrice(fills []Fill) float64 {
+	if len(fills) == 0 {
+		return 0
+	}
+
+	totalValue := 0.0
+	totalQty := 0.0
+
+	for _, fill := range fills {
+		price, _ := strconv.ParseFloat(fill.Price, 64)
+		qty, _ := strconv.ParseFloat(fill.Qty, 64)
+
+		totalValue += price * qty
+		totalQty += qty
+	}
+
+	if totalQty == 0 {
+		return 0
+	}
+
+	return totalValue / totalQty
+}
+
+// Calcular comisión total desde los fills (convertido a USDT)
+func calculateTotalCommission(fills []Fill) float64 {
+	totalCommission := 0.0
+
+	for _, fill := range fills {
+		commission, _ := strconv.ParseFloat(fill.Commission, 64)
+		commissionAsset := fill.CommissionAsset
+
+		// Si la comisión es en la moneda base (BTC, ETH, etc), convertir a USDT
+		if commissionAsset != "USDT" && commissionAsset != "BUSD" {
+			// Para simplificar, usar el precio del fill
+			price, _ := strconv.ParseFloat(fill.Price, 64)
+			totalCommission += commission * price
+		} else {
+			totalCommission += commission
+		}
+	}
+
+	return totalCommission
+}
+
+// ============================================================================
+// FUNCIONES DE TRADING ACTUALIZADAS
+// ============================================================================
+
+func placeBuyOrder(symbol string, usdtAmount float64) (*OrderResponse, error) {
 	startTime := time.Now()
-	
-	balanceMutex.RLock()
-	balanceBefore := usdtBalance
-	balanceMutex.RUnlock()
-	
-	logMsg(fmt.Sprintf("🟢 COMPRA %s | %.2f USDT | Bal: %.2f", symbol, usdtAmount, balanceBefore))
-	
+
+	logMsg(fmt.Sprintf("🟢 COMPRA %s | %.2f USDT", symbol, usdtAmount))
+
 	params := map[string]interface{}{
 		"symbol":        symbol,
 		"side":          "BUY",
 		"type":          "MARKET",
 		"quoteOrderQty": fmt.Sprintf("%.2f", usdtAmount),
 	}
-	
-	_, err := sendAPIRequest("order.place", params, true)
-	
+
+	// CAMBIO: Usar sendAPIRequestAndWait para obtener respuesta
+	response, err := sendAPIRequestAndWait("order.place", params, true, 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("error ejecutando orden: %v", err)
+	}
+
+	// Parsear respuesta de Binance
+	var apiResponse struct {
+		Result OrderResponse `json:"result"`
+	}
+
+	if err := json.Unmarshal(response, &apiResponse); err != nil {
+		return nil, fmt.Errorf("error parseando respuesta: %v", err)
+	}
+
+	orderResp := &apiResponse.Result
+
 	// Registrar latencia
 	latency := time.Since(startTime).Milliseconds()
 	latencyMutex.Lock()
 	totalLatency += latency
 	latencyCount++
 	latencyMutex.Unlock()
-	
-	if err == nil {
-		logMsg(fmt.Sprintf("✅ Orden ejecutada en %dms", latency))
-	}
-	
-	return err
+
+	// Log con datos reales
+	executedQty, _ := strconv.ParseFloat(orderResp.ExecutedQty, 64)
+	quoteQty, _ := strconv.ParseFloat(orderResp.CummulativeQuoteQty, 64)
+	avgPrice := calculateAvgPrice(orderResp.Fills)
+	commission := calculateTotalCommission(orderResp.Fills)
+
+	logMsg(fmt.Sprintf("✅ Orden ejecutada en %dms | Qty: %.8f @ %.4f | Gastado: %.2f | Com: %.4f USDT",
+		latency, executedQty, avgPrice, quoteQty, commission))
+
+	return orderResp, nil
 }
 
-func placeSellOrder(symbol string, quantity float64) error {
-	balanceMutex.RLock()
-	balanceBefore := usdtBalance
-	balanceMutex.RUnlock()
-	
-	logMsg(fmt.Sprintf("🔴 Vendiendo %.8f %s... (Balance antes: %.2f)", quantity, symbol, balanceBefore))
-	
+func placeSellOrder(symbol string, quantity float64) (*OrderResponse, error) {
+	logMsg(fmt.Sprintf("🔴 Vendiendo %.8f %s...", quantity, symbol))
+
 	params := map[string]interface{}{
 		"symbol":   symbol,
 		"side":     "SELL",
 		"type":     "MARKET",
 		"quantity": fmt.Sprintf("%.8f", quantity),
 	}
-	
-	_, err := sendAPIRequest("order.place", params, true)
-	
-	// Nota: El balance se actualiza en la función analyzeTrendAndTrade después de confirmar la venta
-	
-	return err
+
+	response, err := sendAPIRequestAndWait("order.place", params, true, 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+
+	var apiResponse struct {
+		Result OrderResponse `json:"result"`
+	}
+
+	if err := json.Unmarshal(response, &apiResponse); err != nil {
+		return nil, err
+	}
+
+	orderResp := &apiResponse.Result
+
+	// Log con datos reales
+	executedQty, _ := strconv.ParseFloat(orderResp.ExecutedQty, 64)
+	quoteQty, _ := strconv.ParseFloat(orderResp.CummulativeQuoteQty, 64)
+	avgPrice := calculateAvgPrice(orderResp.Fills)
+	commission := calculateTotalCommission(orderResp.Fills)
+
+	logMsg(fmt.Sprintf("✅ Vendido: %.8f @ %.4f | Recibido: %.2f | Com: %.4f USDT",
+		executedQty, avgPrice, quoteQty, commission))
+
+	return orderResp, nil
 }
 
 // ============================================================================
@@ -740,7 +879,7 @@ func checkAndExecutePosition(symbol string, currentPrice float64) bool {
 // executeImmediateSell ejecuta una venta SIN ESPERAR análisis
 func executeImmediateSell(pos *Position, currentPrice, profitPct float64, reason string) {
 	startTime := time.Now()
-	
+
 	// Emoji según resultado
 	emoji := "💰"
 	if profitPct < 0 {
@@ -750,64 +889,64 @@ func executeImmediateSell(pos *Position, currentPrice, profitPct float64, reason
 	} else if reason == "TRAILING_STOP" {
 		emoji = "📈"
 	}
-	
+
 	logMsg(fmt.Sprintf("%s VENTA INMEDIATA %s: %.8f @ %.8f | %s | P/L: %+.3f%%",
 		emoji, pos.Symbol, pos.Quantity, currentPrice, reason, profitPct*100))
-	
-	// Ejecutar venta
-	err := placeSellOrder(pos.Symbol, pos.Quantity)
-	
+
+	// CAMBIO: Recibir respuesta de la orden
+	orderResp, err := placeSellOrder(pos.Symbol, pos.Quantity)
+
 	latency := time.Since(startTime).Milliseconds()
-	
+
 	if err != nil {
 		logMsg(fmt.Sprintf("❌ Error venta inmediata %s: %v", pos.Symbol, err))
 		return
 	}
-	
-	// Actualizar balance
-	soldValue := pos.Quantity * currentPrice
-	buyValue := pos.Quantity * pos.BuyPrice
+
+	// CAMBIO: Usar datos REALES de Binance
+	quoteQty, _ := strconv.ParseFloat(orderResp.CummulativeQuoteQty, 64) // USDT recibido REAL
+	sellCommission := calculateTotalCommission(orderResp.Fills)
+
+	// Calcular profit real
+	buyValue := pos.BuyPrice * pos.Quantity
+	soldValue := quoteQty // ✓ USDT REAL recibido
 	profitBruto := soldValue - buyValue
-	
-	// Calcular comisiones (0.10% compra + 0.10% venta)
-	commissionBuy := buyValue * commissionPerTrade
-	commissionSell := soldValue * commissionPerTrade
-	commissionTotal := commissionBuy + commissionSell
-	
+
+	// Comisiones totales (compra + venta)
+	commissionTotal := pos.BuyCommission + sellCommission
+
 	// Profit NETO = bruto - comisiones
 	profitNeto := profitBruto - commissionTotal
-	
-	balanceMutex.Lock()
-	usdtBalance += soldValue
-	balanceMutex.Unlock()
-	
+
+	// CAMBIO: NO actualizar balance (Binance ya lo hizo automáticamente)
+
 	// Actualizar estadísticas
 	profitMutex.Lock()
-	totalProfit += profitNeto  // Ahora guarda el profit NETO
+	totalProfit += profitNeto
 	totalCommissions += commissionTotal
 	totalTrades++
 	if profitNeto > 0 {
 		winningTrades++
-		totalGains += profitNeto  // Acumular solo ganancias NETAS
+		totalGains += profitNeto
 	} else {
 		losingTrades++
-		totalLosses += math.Abs(profitNeto)  // Acumular solo pérdidas NETAS
+		totalLosses += math.Abs(profitNeto)
 	}
 	profitMutex.Unlock()
-	
+
 	// Registrar latencia
 	latencyMutex.Lock()
 	totalLatency += latency
 	latencyCount++
 	latencyMutex.Unlock()
-	
+
 	// Eliminar posición
 	positionsMutex.Lock()
 	delete(positions, pos.Symbol)
 	positionsMutex.Unlock()
-	
-	logMsg(fmt.Sprintf("✅ Venta ejecutada en %dms | Bruto: %.4f | Com: %.4f | Neto: %+.4f USDT", 
-		latency, profitBruto, commissionTotal, profitNeto))
+
+	logMsg(fmt.Sprintf("✅ Venta ejecutada en %dms | Recibido: %.4f | Bruto: %.4f | Com: %.4f | Neto: %+.4f USDT",
+		latency, quoteQty, profitBruto, commissionTotal, profitNeto))
 }
 
 // ============================================================================
@@ -1518,6 +1657,11 @@ func generateTradeSignal(status *PairStatus, indicators *TechnicalIndicators) *T
 }
 
 func analyzeTrendAndTrade(symbol string) {
+	// Verificar si el bot está corriendo antes de hacer trading
+	botRunningMutex.RLock()
+	running := botRunning
+	botRunningMutex.RUnlock()
+
 	statusesMutex.RLock()
 	status, exists := pairStatuses[symbol]
 	if !exists {
@@ -1666,26 +1810,30 @@ func analyzeTrendAndTrade(symbol string) {
 		
 		if shouldSell {
 			go func() {
-				placeSellOrder(symbol, position.Quantity)
-				
-				// Calcular ganancia/pérdida de la operación
+				// CAMBIO: Recibir respuesta de la orden
+				orderResp, err := placeSellOrder(symbol, position.Quantity)
+				if err != nil {
+					logMsg(fmt.Sprintf("❌ Error vendiendo %s: %v", symbol, err))
+					return
+				}
+
+				// CAMBIO: Usar datos REALES de Binance
+				quoteQty, _ := strconv.ParseFloat(orderResp.CummulativeQuoteQty, 64)
+				sellCommission := calculateTotalCommission(orderResp.Fills)
+
+				// Calcular ganancia/pérdida con datos reales
 				buyValue := position.BuyPrice * position.Quantity
-				saleAmount := currentPrice * position.Quantity
-				profitBruto := saleAmount - buyValue
-				
-				// Calcular comisiones (0.10% compra + 0.10% venta)
-				commBuy := buyValue * commissionPerTrade
-				commSell := saleAmount * commissionPerTrade
-				commTotal := commBuy + commSell
-				
+				profitBruto := quoteQty - buyValue
+
+				// Comisiones totales (compra + venta)
+				commTotal := position.BuyCommission + sellCommission
+
 				// Profit NETO
 				profitNeto := profitBruto - commTotal
-				
-				// Actualizar balance (agregar lo vendido)
-				balanceMutex.Lock()
-				usdtBalance += saleAmount
-				balanceMutex.Unlock()
-				
+
+				// CAMBIO: NO actualizar balance manualmente (Binance ya lo hizo)
+				// Removed: usdtBalance += saleAmount
+
 				// Actualizar estadísticas
 				profitMutex.Lock()
 				totalProfit += profitNeto
@@ -1699,29 +1847,34 @@ func analyzeTrendAndTrade(symbol string) {
 					totalLosses += math.Abs(profitNeto)  // Acumular solo pérdidas NETAS
 				}
 				profitMutex.Unlock()
-				
+
 				positionsMutex.Lock()
 				delete(positions, symbol)
 				positionsMutex.Unlock()
-				
+
 				emoji := "✅"
 				if profitNeto < 0 {
 					emoji = "❌"
 				}
-				
-				logMsg(fmt.Sprintf("%s %s | %s | Bruto: %.4f | Com: %.4f | Neto: %.4f USDT", 
+
+				logMsg(fmt.Sprintf("%s %s | %s | Bruto: %.4f | Com: %.4f | Neto: %.4f USDT",
 					emoji, symbol, sellReason, profitBruto, commTotal, profitNeto))
 			}()
 		}
 		
 	} else {
 		// ====== BUSCAR OPORTUNIDADES DE COMPRA ======
-		
+
+		// Solo buscar oportunidades si el bot está corriendo
+		if !running {
+			return
+		}
+
 		// Verificar número máximo de posiciones
 		positionsMutex.RLock()
 		posCount := len(positions)
 		positionsMutex.RUnlock()
-		
+
 		if posCount >= maxPositions {
 			return
 		}
@@ -1806,35 +1959,40 @@ func analyzeTrendAndTrade(symbol string) {
 				if indicators.Volatility > 2.0 {
 					investAmount = investPerPosition * 0.7 // Reducir en alta volatilidad
 				}
-				
-				if err := placeBuyOrder(symbol, investAmount); err == nil {
-					quantity := investAmount / currentPrice
-					
+
+				// CAMBIO: Recibir respuesta de la orden
+				orderResp, err := placeBuyOrder(symbol, investAmount)
+				if err == nil {
+					// CAMBIO: Usar datos REALES de Binance
+					executedQty, _ := strconv.ParseFloat(orderResp.ExecutedQty, 64)
+					avgPrice := calculateAvgPrice(orderResp.Fills)
+					buyCommission := calculateTotalCommission(orderResp.Fills)
+
 					// Definir stop loss y target según estrategia
-					stopLoss := currentPrice * (1 - stopLossPercent)
-					targetPrice := currentPrice * (1 + normalProfitTarget)
+					stopLoss := avgPrice * (1 - stopLossPercent)
+					targetPrice := avgPrice * (1 + normalProfitTarget)
 					if strategy == "HFT" {
-						targetPrice = currentPrice * (1 + quickProfitTarget)
+						targetPrice = avgPrice * (1 + quickProfitTarget)
 					}
-					
+
 					pos := &Position{
-						Symbol:       symbol,
-						BuyPrice:     currentPrice,
-						Quantity:     quantity,
-						TargetPrice:  targetPrice,
-						StopLoss:     stopLoss,
-						HighestPrice: currentPrice,
-						BuyTime:      time.Now(),
-						Strategy:     strategy,
+						Symbol:        symbol,
+						BuyPrice:      avgPrice,          // Precio real de ejecución
+						Quantity:      executedQty,       // Cantidad real ejecutada
+						TargetPrice:   targetPrice,
+						StopLoss:      stopLoss,
+						HighestPrice:  avgPrice,
+						BuyTime:       time.Now(),
+						Strategy:      strategy,
+						BuyCommission: buyCommission,     // Comisión real de compra
 					}
-					
+
 					positionsMutex.Lock()
 					positions[symbol] = pos
 					positionsMutex.Unlock()
-					
-					balanceMutex.Lock()
-					usdtBalance -= investAmount
-					balanceMutex.Unlock()
+
+					// CAMBIO: NO actualizar balance manualmente (Binance ya lo hizo)
+					// Removed: usdtBalance -= investAmount
 				}
 			}()
 		}
@@ -1842,422 +2000,11 @@ func analyzeTrendAndTrade(symbol string) {
 }
 
 // ============================================================================
-// UI - PANEL TIPO HTOP
+// UI - REMOVIDA - AHORA SE USA WEB SERVER
 // ============================================================================
 
-func startUI() {
-	if err := ui.Init(); err != nil {
-		log.Fatalf("failed to initialize termui: %v", err)
-	}
-	defer ui.Close()
-	
-	// Crear widgets
-	headerBox := widgets.NewParagraph()
-	stopLossStatus := "🛡️ Stop Loss: ON"
-	if !useStopLoss {
-		stopLossStatus = "⚠️ Stop Loss: OFF"
-	}
-	headerBox.Title = fmt.Sprintf("⚡ HFT PRO BOT - MICRO-SCALPING ULTRA RÁPIDO (RSI+MACD+Patterns+Workers) | %s", stopLossStatus)
-	headerBox.SetRect(0, 0, 120, 3)
-	headerBox.BorderStyle.Fg = ui.ColorCyan
-	
-	statsBox := widgets.NewParagraph()
-	statsBox.Title = "📊 Estadísticas"
-	statsBox.SetRect(0, 3, 60, 11)  // Aumentado para 6 líneas de stats
-	statsBox.BorderStyle.Fg = ui.ColorGreen
-	
-	positionsTable := widgets.NewTable()
-	positionsTable.Title = "💼 Posiciones Activas"
-	positionsTable.SetRect(60, 3, 120, 20)
-	positionsTable.TextStyle = ui.NewStyle(ui.ColorWhite)
-	positionsTable.BorderStyle.Fg = ui.ColorYellow
-	
-	pricesTable := widgets.NewTable()
-	pricesTable.Title = "💹 Precios en Tiempo Real"
-	pricesTable.SetRect(0, 11, 60, 35)  // Ajustado para no superponerse
-	pricesTable.TextStyle = ui.NewStyle(ui.ColorWhite)
-	pricesTable.RowSeparator = false
-	
-	logBox := widgets.NewList()
-	logBox.Title = "📝 Log de Actividad"
-	logBox.SetRect(60, 20, 120, 35)
-	logBox.BorderStyle.Fg = ui.ColorMagenta
-	
-	// Actualizar UI cada 500ms
-	uiEvents := ui.PollEvents()
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	
-	render := func() {
-		// Header
-		env := "TESTNET"
-		if !useTestnet {
-			env = "PRODUCCIÓN"
-		}
-		headerBox.Text = fmt.Sprintf(" Entorno: [%s](fg:yellow)  |  WebSocket API: ✅ Conectado", env)
-		
-		// Stats
-		balanceMutex.RLock()
-		balance := usdtBalance
-		balanceMutex.RUnlock()
-		
-		profitMutex.Lock()
-		trades := totalTrades
-		profitMutex.Unlock()
-		
-		positionsMutex.RLock()
-		activePos := len(positions)
-		positionsMutex.RUnlock()
-		
-		statusesMutex.RLock()
-		activePairs := len(pairStatuses)
-		statusesMutex.RUnlock()
-		
-		volatilePairsMutex.RLock()
-		volPairs := volatilePairsCount
-		volatilePairsMutex.RUnlock()
-		
-		// Calcular ganancia de sesión
-		balanceMutex.RLock()
-		initial := initialBalance
-		current := balance
-		balanceMutex.RUnlock()
-		
-		sessionProfit := current - initial
-		sessionProfitPercent := 0.0
-		if initial > 0 {
-			sessionProfitPercent = (sessionProfit / initial) * 100
-		}
-		
-		// Calcular win rate real
-		profitMutex.Lock()
-		winning := winningTrades
-		losing := losingTrades
-		profitMutex.Unlock()
-		
-		winRate := 0.0
-		if trades > 0 {
-			winRate = (float64(winning) / float64(trades)) * 100
-		}
-		
-		// Tiempo de ejecución
-		uptime := time.Since(botStartTime).Round(time.Second)
-		
-		profitColor := "green"
-		if sessionProfit < 0 {
-			profitColor = "red"
-		}
-		
-		// Calcular latencia promedio
-		latencyMutex.Lock()
-		avgLatency := int64(0)
-		if latencyCount > 0 {
-			avgLatency = totalLatency / latencyCount
-		}
-		latencyMutex.Unlock()
-		
-		// Obtener ganancias, pérdidas y comisiones acumuladas
-		profitMutex.Lock()
-		gains := totalGains
-		losses := totalLosses
-		commissions := totalCommissions
-		profitMutex.Unlock()
-		
-		netProfit := gains - losses
-		netColor := "green"
-		if netProfit < 0 {
-			netColor = "red"
-		}
-		
-		workers := atomic.LoadInt32(&currentWorkers)
-		queueLen := len(tradeJobsChan)
-		queueCap := cap(tradeJobsChan)
-		processed := atomic.LoadInt64(&jobsProcessed)
-		
-		statsBox.Text = fmt.Sprintf(
-			"💰 Balance: [%.2f](fg:green) | Inicial: [%.2f](fg:white) | Sesión: [%+.2f USDT](fg:%s) [(%+.2f%%)](fg:%s)\n"+
-				"📊 Posiciones: [%d/%d](fg:yellow) | Pares: [%d](fg:cyan) 🔥Volátiles: [%d](fg:green) | Workers: [%d/%d](fg:magenta)\n"+
-				"📈 Trades: [%d](fg:white) ✅[%d](fg:green) ❌[%d](fg:red) | Win Rate: [%.1f%%](fg:cyan)\n"+
-				"💵 Ganancias(NETO): [+%.4f](fg:green) | Pérdidas: [-%.4f](fg:red) | 💸Comisiones: [%.4f](fg:yellow)\n"+
-				"📊 P/L Real: [%+.4f USDT](fg:%s) | ⚡Lat: [%dms](fg:yellow) | Cola: [%d/%d](fg:cyan) | Jobs: [%d](fg:cyan)\n"+
-				"⏱️  Uptime: [%s](fg:white) | Modo: [⚡ HFT - Min Vol: %.1f%%](fg:magenta)",
-			current, initial, sessionProfit, profitColor, sessionProfitPercent, profitColor,
-			activePos, maxPositions, activePairs, volPairs, workers, maxWorkers,
-			trades, winning, losing, winRate,
-			gains, losses, commissions,
-			netProfit, netColor, avgLatency, queueLen, queueCap, processed,
-			uptime, minVolatility*100,
-		)
-		
-		// Tabla de posiciones con stop loss y estrategia
-		posRows := [][]string{{"Símbolo", "Compra", "Actual", "Target", "Stop", "P/L%", "Estrategia"}}
-		positionsMutex.RLock()
-		for _, pos := range positions {
-			statusesMutex.RLock()
-			status := pairStatuses[pos.Symbol]
-			currentPrice := 0.0
-			if status != nil {
-				currentPrice = status.CurrentPrice
-			}
-			statusesMutex.RUnlock()
-			
-			profitPct := 0.0
-			plColor := "white"
-			if currentPrice > 0 {
-				profitPct = ((currentPrice - pos.BuyPrice) / pos.BuyPrice) * 100
-				if profitPct > 0 {
-					plColor = "green"
-				} else if profitPct < -0.3 {
-					plColor = "red"
-				}
-			}
-			
-			posRows = append(posRows, []string{
-				pos.Symbol,
-				fmt.Sprintf("%.4f", pos.BuyPrice),
-				fmt.Sprintf("%.4f", currentPrice),
-				fmt.Sprintf("%.4f", pos.TargetPrice),
-				fmt.Sprintf("%.4f", pos.StopLoss),
-				fmt.Sprintf("[%.2f%%](fg:%s)", profitPct, plColor),
-				pos.Strategy,
-			})
-		}
-		positionsMutex.RUnlock()
-		positionsTable.Rows = posRows
-		
-		// Tabla de precios con indicadores HFT - Ordenado por VOLATILIDAD
-		priceRows := [][]string{{"Símbolo", "Precio", "Vol%", "RSI", "Señal", "Conf%"}}
-		statusesMutex.RLock()
-		
-		// Convertir a slice para ordenar
-		var statusList []*PairStatus
-		volatileCount := 0
-		for _, s := range pairStatuses {
-			statusList = append(statusList, s)
-			if s.IsVolatile {
-				volatileCount++
-			}
-		}
-		statusesMutex.RUnlock()
-		
-		// Actualizar contador global
-		volatilePairsMutex.Lock()
-		volatilePairsCount = volatileCount
-		volatilePairsMutex.Unlock()
-		
-		// Ordenar por VOLATILIDAD (más volátil primero = más oportunidades)
-		sort.Slice(statusList, func(i, j int) bool {
-			return statusList[i].Volatility > statusList[j].Volatility
-		})
-		
-		// Mostrar top 12
-		for i, status := range statusList {
-			if i >= 12 {
-				break
-			}
-			
-			rsiStr := "-"
-			signalStr := "WAIT"
-			confStr := "-"
-			volStr := "-"
-			volColor := "white"
-			signalColor := "white"
-			
-			if status.Indicators != nil {
-				rsiStr = fmt.Sprintf("%.0f", status.Indicators.RSI)
-			}
-			
-			// Mostrar volatilidad con colores
-			volStr = fmt.Sprintf("%.2f", status.Volatility)
-			if status.Volatility >= idealVolatility {
-				volColor = "green,bold"  // Alta volatilidad = bueno para HFT
-				volStr = "🔥" + volStr
-			} else if status.Volatility >= minVolatility {
-				volColor = "green"       // Volatilidad aceptable
-			} else {
-				volColor = "red"         // Muy baja, no operar
-				volStr = "❄️" + volStr
-			}
-			
-			if status.Signal != nil {
-				signalStr = status.Signal.Action
-				confStr = fmt.Sprintf("%.0f", status.Signal.Confidence)
-				
-				if status.Signal.Action == "BUY" {
-					if status.Signal.Confidence >= 80 {
-						signalColor = "green,bold"
-						signalStr = "⚡BUY"
-					} else if status.Signal.Confidence >= 70 {
-						signalColor = "green"
-					}
-				} else if status.Signal.Action == "SELL" {
-					signalColor = "red"
-				}
-			}
-			
-			priceRows = append(priceRows, []string{
-				status.Symbol,
-				fmt.Sprintf("%.4f", status.CurrentPrice),
-				fmt.Sprintf("[%s](fg:%s)", volStr, volColor),
-				rsiStr,
-				fmt.Sprintf("[%s](fg:%s)", signalStr, signalColor),
-				confStr,
-			})
-		}
-		pricesTable.Rows = priceRows
-		
-		// Log
-		logMutex.Lock()
-		logBox.Rows = logMessages
-		if len(logMessages) > maxLogLines {
-			logBox.Rows = logMessages[len(logMessages)-maxLogLines:]
-		}
-		logMutex.Unlock()
-		
-		ui.Render(headerBox, statsBox, positionsTable, pricesTable, logBox)
-	}
-	
-	// Modal de cierre de trades
-	closeModal := widgets.NewParagraph()
-	closeModal.Title = "🔒 CERRAR TRADES"
-	closeModal.SetRect(30, 10, 90, 20)
-	closeModal.BorderStyle.Fg = ui.ColorRed
-	closeModal.Text = "\n   Selecciona una opción:\n\n" +
-		"   [1] Vender TODAS las posiciones al precio actual\n" +
-		"   [2] Vender SOLO con GANANCIA (mantener pérdidas)\n\n" +
-		"   [ESC] Cancelar y volver"
-
-	showCloseModal := false
-
-	// Modal de resumen de cierre
-	summaryModal := widgets.NewParagraph()
-	summaryModal.Title = "📋 RESUMEN DE CIERRE"
-	summaryModal.SetRect(10, 5, 110, 30)
-	summaryModal.BorderStyle.Fg = ui.ColorGreen
-	summaryModal.WrapText = true
-	
-	for {
-		select {
-		case e := <-uiEvents:
-			// Verificar si hay modal de resumen disponible
-			summaryModalMutex.Lock()
-			summaryActive := showSummaryModal
-			summaryModalMutex.Unlock()
-
-			if summaryActive {
-				// Modal de resumen activo
-				switch e.ID {
-				case "<Enter>", "<Escape>", "q":
-					summaryModalMutex.Lock()
-					showSummaryModal = false
-					summaryModalMutex.Unlock()
-					logMsg("✅ Resumen cerrado")
-					render()
-				}
-			} else if showCloseModal {
-				// Modal de cierre activo
-				switch e.ID {
-				case "1":
-					showCloseModal = false
-					logMsg("🔄 Cerrando TODAS las posiciones...")
-					go closeAllTrades(false) // false = vender todo
-					render()
-				case "2":
-					showCloseModal = false
-					logMsg("🔄 Cerrando posiciones con GANANCIA...")
-					go closeAllTrades(true) // true = solo con ganancia
-					render()
-				case "<Escape>", "q":
-					showCloseModal = false
-					logMsg("❌ Cierre de trades cancelado")
-					render()
-				}
-			} else {
-				// Modo normal
-				switch e.ID {
-				case "q", "<C-c>":
-					return
-				case "c":
-					showCloseModal = true
-					ui.Render(headerBox, statsBox, positionsTable, pricesTable, logBox, closeModal)
-				case "<Enter>":
-					// Si hay un resumen disponible, mostrarlo
-					closeSummaryMutex.RLock()
-					hasSummary := lastCloseSummary != nil
-					closeSummaryMutex.RUnlock()
-
-					if hasSummary {
-						summaryModalMutex.Lock()
-						showSummaryModal = true
-						summaryModalMutex.Unlock()
-					}
-				}
-			}
-		case <-ticker.C:
-			// Verificar si hay modal de resumen disponible
-			summaryModalMutex.Lock()
-			summaryActive := showSummaryModal
-			summaryModalMutex.Unlock()
-
-			if summaryActive {
-				// Actualizar contenido del modal de resumen
-				closeSummaryMutex.RLock()
-				if lastCloseSummary != nil {
-					summaryText := fmt.Sprintf("\n  ⏰ Hora: %s\n\n", lastCloseSummary.Timestamp.Format("15:04:05"))
-					summaryText += fmt.Sprintf("  💰 Balance Final: %.2f USDT\n", lastCloseSummary.FinalBalance)
-					summaryText += fmt.Sprintf("  📊 Ganancia Neta: %+.4f USDT\n\n", lastCloseSummary.TotalProfit)
-
-					summaryText += fmt.Sprintf("  ✅ Vendidas: %d | ❌ Fallidas: %d | ⏸️  Omitidas: %d\n\n",
-						lastCloseSummary.SuccessCount, lastCloseSummary.FailedCount, lastCloseSummary.SkippedCount)
-
-					if len(lastCloseSummary.SuccessList) > 0 {
-						summaryText += "  ✅ VENTAS EXITOSAS:\n"
-						for _, item := range lastCloseSummary.SuccessList {
-							summaryText += fmt.Sprintf("     • %s\n", item)
-						}
-						summaryText += "\n"
-					}
-
-					if len(lastCloseSummary.FailedList) > 0 {
-						summaryText += "  ❌ VENTAS FALLIDAS:\n"
-						for _, item := range lastCloseSummary.FailedList {
-							summaryText += fmt.Sprintf("     • %s - %s\n", item.Symbol, item.Reason)
-						}
-						summaryText += "\n"
-					}
-
-					if len(lastCloseSummary.SkippedList) > 0 {
-						summaryText += "  ⏸️  POSICIONES OMITIDAS:\n"
-						for _, item := range lastCloseSummary.SkippedList {
-							summaryText += fmt.Sprintf("     • %s - %s\n", item.Symbol, item.Reason)
-						}
-						summaryText += "\n"
-					}
-
-					summaryText += "\n  [ENTER/ESC] Cerrar"
-					summaryModal.Text = summaryText
-
-					// Ajustar color del borde según el resultado
-					if lastCloseSummary.TotalProfit > 0 {
-						summaryModal.BorderStyle.Fg = ui.ColorGreen
-					} else if lastCloseSummary.TotalProfit < 0 {
-						summaryModal.BorderStyle.Fg = ui.ColorRed
-					} else {
-						summaryModal.BorderStyle.Fg = ui.ColorYellow
-					}
-				}
-				closeSummaryMutex.RUnlock()
-
-				ui.Render(headerBox, statsBox, positionsTable, pricesTable, logBox, summaryModal)
-			} else if !showCloseModal {
-				render()
-			} else {
-				// Mantener el modal de cierre visible
-				ui.Render(headerBox, statsBox, positionsTable, pricesTable, logBox, closeModal)
-			}
-		}
-	}
-}
+// La función startUI() ha sido eliminada y reemplazada por startWebServer()
+// El dashboard ahora es una interfaz web con Tailwind CSS y WebSockets
 
 func logMsg(msg string) {
 	timestamp := time.Now().Format("15:04:05")
@@ -2269,102 +2016,6 @@ func logMsg(msg string) {
 		logMessages = logMessages[1:]
 	}
 	logMutex.Unlock()
-}
-
-// ============================================================================
-// CONFIGURACIÓN INICIAL INTERACTIVA
-// ============================================================================
-
-func askUserConfiguration() {
-	reader := bufio.NewReader(os.Stdin)
-	
-	fmt.Println("\n" + strings.Repeat("═", 60))
-	fmt.Println("⚙️  CONFIGURACIÓN DEL TRADE")
-	fmt.Println(strings.Repeat("═", 60))
-	
-	// Pregunta 1: ¿Cuánto dinero invertir?
-	fmt.Print("\n💰 ¿Cuánto dinero invertir en este trade? (USDT) [default: 100]: ")
-	input1, _ := reader.ReadString('\n')
-	input1 = strings.TrimSpace(input1)
-	if input1 == "" {
-		totalInvestUSDT = defaultMaxInvestUSDT
-	} else {
-		val, err := strconv.ParseFloat(input1, 64)
-		if err != nil || val <= 0 {
-			fmt.Println("⚠️  Valor inválido, usando default: 100 USDT")
-			totalInvestUSDT = defaultMaxInvestUSDT
-		} else {
-			totalInvestUSDT = val
-		}
-	}
-	fmt.Printf("   ✅ Inversión total: %.2f USDT\n", totalInvestUSDT)
-	
-	// Pregunta 2: ¿Cuánto dinero por posición?
-	maxPerPos := totalInvestUSDT / float64(maxPositions)
-	fmt.Printf("\n📊 ¿Cuánto dinero por posición? (USDT) [default: %.2f, max: %.2f]: ", defaultMinInvestUSDT, maxPerPos)
-	input2, _ := reader.ReadString('\n')
-	input2 = strings.TrimSpace(input2)
-	if input2 == "" {
-		investPerPosition = defaultMinInvestUSDT
-	} else {
-		val, err := strconv.ParseFloat(input2, 64)
-		if err != nil || val <= 0 {
-			fmt.Println("⚠️  Valor inválido, usando default")
-			investPerPosition = defaultMinInvestUSDT
-		} else if val > maxPerPos {
-			fmt.Printf("⚠️  Valor muy alto, ajustando a %.2f USDT\n", maxPerPos)
-			investPerPosition = maxPerPos
-		} else {
-			investPerPosition = val
-		}
-	}
-	fmt.Printf("   ✅ Inversión por posición: %.2f USDT\n", investPerPosition)
-	
-	// Pregunta 3: ¿Número de posiciones?
-	fmt.Printf("\n📊 ¿Cuántas posiciones simultáneas máximo? [default: %d]: ", defaultMaxPositions)
-	input3, _ := reader.ReadString('\n')
-	input3 = strings.TrimSpace(input3)
-	if input3 == "" {
-		maxPositions = defaultMaxPositions
-	} else {
-		val, err := strconv.Atoi(input3)
-		if err != nil || val <= 0 {
-			fmt.Printf("⚠️  Valor inválido, usando default: %d\n", defaultMaxPositions)
-			maxPositions = defaultMaxPositions
-		} else if val > 50 {
-			fmt.Println("⚠️  Máximo permitido: 50 posiciones")
-			maxPositions = 50
-		} else {
-			maxPositions = val
-		}
-	}
-	fmt.Printf("   ✅ Posiciones máximas: %d\n", maxPositions)
-	
-	// Pregunta 4: ¿Usar stop loss?
-	fmt.Print("\n🛡️  ¿Aplicar estrategias de Stop Loss? (s/n) [default: s]: ")
-	input4, _ := reader.ReadString('\n')
-	input4 = strings.ToLower(strings.TrimSpace(input4))
-	if input4 == "" || input4 == "s" || input4 == "si" || input4 == "yes" || input4 == "y" {
-		useStopLoss = true
-		onlySellOnProfit = false  // Con stop loss, puede vender con pérdida
-		fmt.Println("   ✅ Stop Loss: ACTIVADO (venderá si llega al stop loss)")
-	} else {
-		useStopLoss = false
-		onlySellOnProfit = true   // Sin stop loss, solo vende con ganancia
-		fmt.Println("   ✅ Stop Loss: DESACTIVADO (solo venderá con ganancia)")
-	}
-	
-	// Resumen
-	fmt.Println("\n" + strings.Repeat("─", 60))
-	fmt.Println("📋 RESUMEN DE CONFIGURACIÓN:")
-	fmt.Printf("   • Inversión total: %.2f USDT\n", totalInvestUSDT)
-	fmt.Printf("   • Por posición: %.2f USDT\n", investPerPosition)
-	fmt.Printf("   • Max posiciones: %d\n", maxPositions)
-	fmt.Printf("   • Stop Loss: %v\n", useStopLoss)
-	fmt.Println(strings.Repeat("─", 60))
-	
-	fmt.Print("\n🚀 Presiona ENTER para iniciar el bot...")
-	reader.ReadString('\n')
 }
 
 // ============================================================================
@@ -2417,19 +2068,18 @@ func closeAllTrades(onlyProfit bool) {
 		}
 		
 		buyValue := pos.BuyPrice * pos.Quantity
-		saleValue := currentPrice * pos.Quantity
-		profitBruto := saleValue - buyValue
-		
-		// Calcular comisiones
-		commBuy := buyValue * commissionPerTrade
-		commSell := saleValue * commissionPerTrade
-		commTotal := commBuy + commSell
-		profitNeto := profitBruto - commTotal
-		
-		profitPct := (profitNeto / buyValue) * 100  // Porcentaje NETO
-		
-		// Si solo con ganancia, verificar profit NETO
-		if onlyProfit && profitNeto < 0 {
+
+		// CAMBIO: Calcular profit estimado para verificar si vender (solo para filtro onlyProfit)
+		estimatedSaleValue := currentPrice * pos.Quantity
+		estimatedProfitBruto := estimatedSaleValue - buyValue
+		estimatedCommSell := estimatedSaleValue * commissionPerTrade
+		estimatedCommTotal := pos.BuyCommission + estimatedCommSell
+		estimatedProfitNeto := estimatedProfitBruto - estimatedCommTotal
+
+		profitPct := (estimatedProfitNeto / buyValue) * 100  // Porcentaje NETO estimado
+
+		// Si solo con ganancia, verificar profit NETO estimado
+		if onlyProfit && estimatedProfitNeto < 0 {
 			reason := fmt.Sprintf("P/L neto %.2f%% (pérdida)", profitPct)
 			logMsg(fmt.Sprintf("⏸️  %s: %s, NO vendido", pos.Symbol, reason))
 			summary.SkippedList = append(summary.SkippedList, struct{ Symbol string; Reason string }{
@@ -2439,19 +2089,13 @@ func closeAllTrades(onlyProfit bool) {
 			skippedCount++
 			continue
 		}
-		
+
 		// Ejecutar venta
-		logMsg(fmt.Sprintf("📤 Vendiendo %s: Compra=%.4f, Actual=%.4f, Bruto=%.4f, Com=%.4f", 
-			pos.Symbol, pos.BuyPrice, currentPrice, profitBruto, commTotal))
-		
-		params := map[string]interface{}{
-			"symbol":   pos.Symbol,
-			"side":     "SELL",
-			"type":     "MARKET",
-			"quantity": fmt.Sprintf("%.6f", pos.Quantity),
-		}
-		
-		_, err := sendAPIRequestAndWait("order.place", params, true, 10*time.Second)
+		logMsg(fmt.Sprintf("📤 Vendiendo %s: Compra=%.4f, Actual=%.4f",
+			pos.Symbol, pos.BuyPrice, currentPrice))
+
+		// CAMBIO: Usar placeSellOrder para obtener datos reales
+		orderResp, err := placeSellOrder(pos.Symbol, pos.Quantity)
 		if err != nil {
 			reason := fmt.Sprintf("Error API: %v", err)
 			logMsg(fmt.Sprintf("❌ Error vendiendo %s: %v", pos.Symbol, err))
@@ -2461,7 +2105,17 @@ func closeAllTrades(onlyProfit bool) {
 			})
 			continue
 		}
-		
+
+		// CAMBIO: Usar datos REALES de Binance
+		quoteQty, _ := strconv.ParseFloat(orderResp.CummulativeQuoteQty, 64)
+		sellCommission := calculateTotalCommission(orderResp.Fills)
+
+		// Calcular profit con datos reales
+		profitBruto := quoteQty - buyValue
+		commTotal := pos.BuyCommission + sellCommission
+		profitNeto := profitBruto - commTotal
+		profitPct = (profitNeto / buyValue) * 100  // Actualizar con datos reales
+
 		// Actualizar estadísticas con profit NETO
 		profitMutex.Lock()
 		totalTrades++
@@ -2475,9 +2129,9 @@ func closeAllTrades(onlyProfit bool) {
 		}
 		totalProfit += profitNeto
 		profitMutex.Unlock()
-		
+
 		totalProfitClosed += profitNeto
-		
+
 		// Eliminar posición
 		positionsMutex.Lock()
 		delete(positions, pos.Symbol)
@@ -2486,7 +2140,8 @@ func closeAllTrades(onlyProfit bool) {
 		// Registrar venta exitosa
 		summary.SuccessList = append(summary.SuccessList, fmt.Sprintf("%s: %.4f USDT (%.2f%%)", pos.Symbol, profitNeto, profitPct))
 		closedCount++
-		logMsg(fmt.Sprintf("✅ %s vendido: Neto %.4f USDT (%.2f%%)", pos.Symbol, profitNeto, profitPct))
+		logMsg(fmt.Sprintf("✅ %s vendido: Bruto %.4f | Com %.4f | Neto %.4f USDT (%.2f%%)",
+			pos.Symbol, profitBruto, commTotal, profitNeto, profitPct))
 	}
 	
 	// Completar resumen con contadores
@@ -2560,55 +2215,49 @@ func main() {
 	// Log inicial en terminal
 	fmt.Println("🚀 Iniciando Bot de Trading Binance - USDT")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	
+
 	if useTestnet {
 		fmt.Println("🧪 Entorno: TESTNET (dinero ficticio)")
 	} else {
 		fmt.Println("🔴 Entorno: PRODUCCIÓN (dinero REAL)")
 	}
-	
-	// Preguntas de configuración
-	askUserConfiguration()
-	
+
+	fmt.Println("🌐 Configura y controla el bot desde http://localhost:8080")
 	fmt.Println()
-	
+
 	// Inicializar sistema HFT
 	initHFTSystem()
-	
+
 	// Conectar WebSocket API
 	if err := connectWebSocketAPI(); err != nil {
 		log.Fatal(err)
 	}
-	
+
 	// Esperar un poco a que se establezca la conexión
-	time.Sleep(500 * time.Millisecond) // Reducido para más velocidad
-	
-	// Obtener balance
+	time.Sleep(500 * time.Millisecond)
+
+	// Obtener balance inicial
 	logMsg("Consultando balance de cuenta...")
 	if err := getAccountBalance(); err != nil {
 		logMsg(fmt.Sprintf("⚠️  Error obteniendo balance: %v", err))
 		logMsg("Continuando con balance en 0...")
 	}
-	
-	// Obtener pares USDT dinámicamente
-	pairs, err := getExchangeInfo()
-	if err != nil {
-		log.Fatal(fmt.Sprintf("Error obteniendo pares: %v", err))
-	}
-	
-	// Iniciar stream para cada par
-	logMsg(fmt.Sprintf("Iniciando streams para %d pares...", len(pairs)))
-	for _, pair := range pairs {
-		go startPriceStream(pair)
-		time.Sleep(100 * time.Millisecond) // Evitar saturar
-	}
-	
-	time.Sleep(2 * time.Second)
-	
-	logMsg("✅ Sistema iniciado - Presiona 'q' salir | 'c' cerrar trades")
-	
-	// Iniciar UI
-	startUI()
-	
-	fmt.Println("\n👋 Bot detenido")
+
+	// Iniciar sincronización periódica del balance
+	startBalanceSync()
+
+	logMsg("✅ Sistema listo - Esperando configuración desde web")
+	logMsg("📋 Configuración por defecto:")
+	logMsg(fmt.Sprintf("   • Inversión total: %.2f USDT", totalInvestUSDT))
+	logMsg(fmt.Sprintf("   • Por posición: %.2f USDT", investPerPosition))
+	logMsg(fmt.Sprintf("   • Max posiciones: %d", maxPositions))
+	logMsg(fmt.Sprintf("   • Stop Loss: %v", useStopLoss))
+	logMsg("⏸️  Bot detenido - Inicia desde la web para comenzar a operar")
+
+	// Iniciar servidor web
+	log.Println("🌐 Iniciando servidor web en http://localhost:8080")
+	startWebServer()
+
+	// Mantener el programa corriendo
+	select {}
 }
