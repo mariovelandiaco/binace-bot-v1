@@ -376,8 +376,13 @@ func readWebSocketAPIResponses() {
 		_, message, err := apiConn.ReadMessage()
 		if err != nil {
 			logMsg(fmt.Sprintf("❌ Error leyendo WebSocket API: %v", err))
+			logMsg("🔄 Intentando reconectar en 5 segundos...")
 			time.Sleep(5 * time.Second)
-			connectWebSocketAPI()
+			
+			// Intentar reconectar
+			if err := connectWebSocketAPI(); err != nil {
+				logMsg(fmt.Sprintf("⚠️  No se pudo reconectar: %v", err))
+			}
 			return
 		}
 		
@@ -386,8 +391,45 @@ func readWebSocketAPIResponses() {
 	}
 }
 
-func sendAPIRequest(method string, params map[string]interface{}, needsSignature bool) (string, error) {
+// reconnectBinance intenta reconectar a Binance manualmente
+func reconnectBinance() error {
+	logMsg("🔄 Reconectando a Binance...")
+	
+	// Actualizar configuración por si cambiaron las credenciales
+	updateEnvironmentConfig()
+	
+	// Cerrar conexión anterior si existe
 	apiMutex.Lock()
+	if apiConn != nil {
+		apiConn.Close()
+		apiConn = nil
+	}
+	apiMutex.Unlock()
+	
+	// Intentar nueva conexión
+	if err := connectWebSocketAPI(); err != nil {
+		logMsg(fmt.Sprintf("❌ Error reconectando: %v", err))
+		return err
+	}
+	
+	logMsg("✅ Reconexión exitosa")
+	
+	// Actualizar balance
+	time.Sleep(500 * time.Millisecond)
+	if err := getAccountBalance(); err != nil {
+		logMsg(fmt.Sprintf("⚠️  Error obteniendo balance: %v", err))
+	}
+	
+	return nil
+}
+
+func sendAPIRequest(method string, params map[string]interface{}, needsSignature bool) (string, error) {
+	// Verificar que hay conexión
+	apiMutex.Lock()
+	if apiConn == nil {
+		apiMutex.Unlock()
+		return "", fmt.Errorf("no hay conexión a Binance - configura las API keys e inicia el bot")
+	}
 	requestID++
 	reqID := requestID
 	apiMutex.Unlock()
@@ -2259,19 +2301,25 @@ func main() {
 	// Inicializar sistema HFT
 	initHFTSystem()
 
-	// Conectar WebSocket API
+	// Conectar WebSocket API (NO MATAR si falla - solo advertir)
 	if err := connectWebSocketAPI(); err != nil {
-		log.Fatal(err)
-	}
+		logMsg(fmt.Sprintf("⚠️  Error conectando a Binance: %v", err))
+		logMsg("⚠️  El servidor web seguirá funcionando")
+		logMsg("💡 Posibles causas:")
+		logMsg("   1. API keys no configuradas (configúralas desde la web)")
+		logMsg("   2. Problema de red o firewall")
+		logMsg("   3. Binance API temporalmente no disponible")
+		// NO hacer log.Fatal() - continuar sin conexión
+	} else {
+		// Esperar un poco a que se establezca la conexión
+		time.Sleep(500 * time.Millisecond)
 
-	// Esperar un poco a que se establezca la conexión
-	time.Sleep(500 * time.Millisecond)
-
-	// Obtener balance inicial
-	logMsg("Consultando balance de cuenta...")
-	if err := getAccountBalance(); err != nil {
-		logMsg(fmt.Sprintf("⚠️  Error obteniendo balance: %v", err))
-		logMsg("Continuando con balance en 0...")
+		// Obtener balance inicial (solo si la conexión fue exitosa)
+		logMsg("Consultando balance de cuenta...")
+		if err := getAccountBalance(); err != nil {
+			logMsg(fmt.Sprintf("⚠️  Error obteniendo balance: %v", err))
+			logMsg("Continuando con balance en 0...")
+		}
 	}
 
 	// Iniciar sincronización periódica del balance

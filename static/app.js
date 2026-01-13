@@ -492,6 +492,13 @@ function stopBot() {
     }
 }
 
+// Reconnect to Binance
+function reconnectBinance() {
+    if (confirm('¿Reconectar a Binance? Esto reiniciará la conexión WebSocket con las API keys configuradas.')) {
+        sendCommand('reconnect');
+    }
+}
+
 // Escape HTML to prevent XSS
 function escapeHtml(text) {
     const div = document.createElement('div');

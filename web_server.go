@@ -211,6 +211,8 @@ func handleCommand(cmd map[string]interface{}) {
 		handleDismissSummary()
 	case "reset":
 		handleReset()
+	case "reconnect":
+		handleReconnect()
 	}
 }
 
@@ -381,6 +383,16 @@ func handleDismissSummary() {
 	summaryModalMutex.Unlock()
 
 	logMsg("✅ Resumen de cierre descartado")
+}
+
+// Manejar reconexión a Binance
+func handleReconnect() {
+	logMsg("🔄 Reconectando a Binance desde web...")
+	go func() {
+		if err := reconnectBinance(); err != nil {
+			logMsg(fmt.Sprintf("❌ Error reconectando: %v", err))
+		}
+	}()
 }
 
 // Manejar reset completo del bot
