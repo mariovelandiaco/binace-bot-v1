@@ -86,6 +86,9 @@ type StatsData struct {
 
 type ConfigData struct {
 	BotRunning         bool    `json:"botRunning"`
+	UseTestnet         bool    `json:"useTestnet"`         // true = TESTNET, false = PRODUCCIÓN
+	UserAPIKey         string  `json:"userAPIKey"`         // API Key del usuario
+	UserSecretKey      string  `json:"userSecretKey"`      // Secret Key del usuario
 	TotalInvestUSDT    float64 `json:"totalInvestUSDT"`
 	InvestPerPosition  float64 `json:"investPerPosition"`
 	MaxPositions       int     `json:"maxPositions"`
@@ -213,6 +216,47 @@ func handleConfigure(cmd map[string]interface{}) {
 	if !ok {
 		logMsg("❌ Error: configuración inválida")
 		return
+	}
+
+	// Actualizar configuración de conexión
+	envChanged := false
+	if val, ok := config["useTestnet"].(bool); ok {
+		if useTestnet != val {
+			useTestnet = val
+			envChanged = true
+		}
+	}
+	if val, ok := config["userAPIKey"].(string); ok {
+		userAPIKey = val
+	}
+	if val, ok := config["userSecretKey"].(string); ok {
+		userSecretKey = val
+	}
+
+	// Si cambió el entorno o las credenciales, actualizar configuración
+	if envChanged || userAPIKey != "" || userSecretKey != "" {
+		updateEnvironmentConfig()
+
+		// Mostrar advertencia si hay posiciones abiertas
+		positionsMutex.RLock()
+		hasPositions := len(positions) > 0
+		positionsMutex.RUnlock()
+
+		if hasPositions {
+			logMsg("⚠️  ADVERTENCIA: Cambio de entorno con posiciones abiertas")
+			logMsg("   Se recomienda cerrar todas las posiciones antes de cambiar de entorno")
+		}
+
+		if envChanged {
+			if useTestnet {
+				logMsg("🧪 Modo cambiado a: TESTNET (ficticio)")
+			} else {
+				logMsg("🔴 Modo cambiado a: PRODUCCIÓN (dinero real)")
+			}
+		}
+		if userAPIKey != "" || userSecretKey != "" {
+			logMsg("🔑 Credenciales de API actualizadas")
+		}
 	}
 
 	// Actualizar configuración global
@@ -663,8 +707,26 @@ func collectDashboardData() DashboardData {
 	running := botRunning
 	botRunningMutex.RUnlock()
 
+	// Enmascarar las claves secretas para mostrar en el frontend
+	maskedAPIKey := ""
+	if userAPIKey != "" {
+		if len(userAPIKey) > 8 {
+			maskedAPIKey = userAPIKey[:4] + "..." + userAPIKey[len(userAPIKey)-4:]
+		} else {
+			maskedAPIKey = "***"
+		}
+	}
+
+	maskedSecretKey := ""
+	if userSecretKey != "" {
+		maskedSecretKey = "***************"
+	}
+
 	config := ConfigData{
 		BotRunning:         running,
+		UseTestnet:         useTestnet,
+		UserAPIKey:         maskedAPIKey,    // Enviar clave enmascarada para mostrar
+		UserSecretKey:      maskedSecretKey, // Enviar clave enmascarada para mostrar
 		TotalInvestUSDT:    totalInvestUSDT,
 		InvestPerPosition:  investPerPosition,
 		MaxPositions:       maxPositions,

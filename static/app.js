@@ -327,6 +327,17 @@ function updateConfig(config) {
 
     // No actualizar inputs si el usuario está editando (evita sobrescribir cambios)
     if (!isEditingConfig) {
+        // Update form inputs - API Configuration
+        document.getElementById('useTestnet').checked = config.useTestnet;
+        // No mostrar las claves enmascaradas en los inputs para evitar confusión
+        // Solo mostrar si están vacías (primera carga)
+        if (!document.getElementById('userAPIKey').value) {
+            document.getElementById('userAPIKey').value = '';
+        }
+        if (!document.getElementById('userSecretKey').value) {
+            document.getElementById('userSecretKey').value = '';
+        }
+
         // Update form inputs - Capital Management
         document.getElementById('totalInvestUSDT').value = config.totalInvestUSDT;
         document.getElementById('investPerPosition').value = config.investPerPosition;
@@ -379,6 +390,9 @@ function updateBotStatus(isRunning) {
 // Save configuration
 function saveConfig() {
     const config = {
+        useTestnet: document.getElementById('useTestnet').checked,
+        userAPIKey: document.getElementById('userAPIKey').value.trim(),
+        userSecretKey: document.getElementById('userSecretKey').value.trim(),
         totalInvestUSDT: parseFloat(document.getElementById('totalInvestUSDT').value),
         investPerPosition: parseFloat(document.getElementById('investPerPosition').value),
         maxPositions: parseInt(document.getElementById('maxPositionsInput').value),
@@ -389,7 +403,7 @@ function saveConfig() {
         trailingStop: parseFloat(document.getElementById('trailingStop').value)
     };
 
-    console.log('💾 Guardando configuración:', config);
+    console.log('💾 Guardando configuración:', { ...config, userSecretKey: '***' }); // No loggear la secret key
 
     // Validate - Capital Management
     if (config.totalInvestUSDT < 10 || config.investPerPosition < 10 || config.maxPositions < 1) {
@@ -465,6 +479,9 @@ function escapeHtml(text) {
 // Detect when user starts editing config inputs
 function setupConfigEditDetection() {
     const configInputs = [
+        'useTestnet',
+        'userAPIKey',
+        'userSecretKey',
         'totalInvestUSDT',
         'investPerPosition',
         'maxPositionsInput',

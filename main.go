@@ -23,19 +23,13 @@ import (
 // CONFIGURACIÓN
 // ============================================================================
 const (
-	useTestnet = true // true = TESTNET (ficticio), false = PRODUCCIÓN (real)
-	
 	// TESTNET
 	testnetWSAPI  = "wss://ws-api.testnet.binance.vision/ws-api/v3"
 	testnetStream = "wss://stream.testnet.binance.vision/ws"
-	testnetAPIKey = "cIxbsNc9CX08ppMM6BioVtdg5dVMquof1vTRcviZogL6i9oRdwoVQyKwT0gDEZEN"
-	testnetSecret = "0GxTGs6BSlUWkjY9I3CoNzgh6Z6tZKLxgUWJ5TzsqUbtXzKSD39zYAT4pduWHzER"
-	
+
 	// PRODUCCIÓN
 	prodWSAPI  = "wss://ws-api.binance.com/ws-api/v3"
 	prodStream = "wss://stream.binance.com:9443/ws"
-	prodAPIKey = "TU_API_KEY_PRODUCCION"
-	prodSecret = "TU_SECRET_KEY_PRODUCCION"
 	
 	// ==================== ESTRATEGIA HFT PRO - AJUSTADA A COMISIONES ====================
 	
@@ -106,6 +100,11 @@ var (
 	streamURL string
 	apiKey    string
 	secretKey string
+
+	// Configuración de conexión (se configura desde web)
+	useTestnet         = true  // true = TESTNET (ficticio), false = PRODUCCIÓN (real)
+	userAPIKey         = ""    // API Key del usuario
+	userSecretKey      = ""    // Secret Key del usuario
 
 	// Configuración del usuario (se configura desde web)
 	totalInvestUSDT   = defaultMaxInvestUSDT   // Dinero total a invertir en este trade
@@ -2211,22 +2210,35 @@ func closeAllTrades(onlyProfit bool) {
 }
 
 // ============================================================================
+// FUNCIONES DE CONFIGURACIÓN
+// ============================================================================
+
+// updateEnvironmentConfig actualiza las URLs y las credenciales según la configuración
+func updateEnvironmentConfig() {
+	if useTestnet {
+		wsAPIURL = testnetWSAPI
+		streamURL = testnetStream
+	} else {
+		wsAPIURL = prodWSAPI
+		streamURL = prodStream
+	}
+
+	// Usar las credenciales del usuario si están configuradas
+	if userAPIKey != "" {
+		apiKey = userAPIKey
+	}
+	if userSecretKey != "" {
+		secretKey = userSecretKey
+	}
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
 func main() {
-	// Configurar entorno
-	if useTestnet {
-		wsAPIURL = testnetWSAPI
-		streamURL = testnetStream
-		apiKey = testnetAPIKey
-		secretKey = testnetSecret
-	} else {
-		wsAPIURL = prodWSAPI
-		streamURL = prodStream
-		apiKey = prodAPIKey
-		secretKey = prodSecret
-	}
+	// Configurar entorno (URLs según modo testnet/producción)
+	updateEnvironmentConfig()
 	
 	// Log inicial en terminal
 	fmt.Println("🚀 Iniciando Bot de Trading Binance - USDT")
