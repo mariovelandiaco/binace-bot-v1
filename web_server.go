@@ -98,6 +98,10 @@ type ConfigData struct {
 	NormalProfitTarget float64 `json:"normalProfitTarget"` // en porcentaje (ej: 0.7 para 0.7%)
 	StopLossPercent    float64 `json:"stopLossPercent"`    // en porcentaje (ej: 0.3 para 0.3%)
 	TrailingStop       float64 `json:"trailingStop"`       // en porcentaje (ej: 0.1 para 0.1%)
+	// Configuración avanzada
+	MicroScalpTarget   float64 `json:"microScalpTarget"`   // en porcentaje (ej: 0.3 para 0.3%)
+	MaxProfitTarget    float64 `json:"maxProfitTarget"`    // en porcentaje (ej: 1.3 para 1.3%)
+	MicroStopLoss      float64 `json:"microStopLoss"`      // en porcentaje (ej: 0.1 para 0.1%)
 }
 
 type PositionData struct {
@@ -290,6 +294,17 @@ func handleConfigure(cmd map[string]interface{}) {
 	}
 	if val, ok := config["trailingStop"].(float64); ok && val > 0 {
 		trailingStop = val / 100.0
+	}
+
+	// Actualizar configuración avanzada (convertir de % a decimal)
+	if val, ok := config["microScalpTarget"].(float64); ok && val > 0 {
+		microScalpTarget = val / 100.0
+	}
+	if val, ok := config["maxProfitTarget"].(float64); ok && val > 0 {
+		maxProfitTarget = val / 100.0
+	}
+	if val, ok := config["microStopLoss"].(float64); ok && val > 0 {
+		microStopLoss = val / 100.0
 	}
 
 	logMsg("✅ Configuración actualizada desde web")
@@ -736,6 +751,10 @@ func collectDashboardData() DashboardData {
 		NormalProfitTarget: normalProfitTarget * 100, // Convertir a % para mostrar
 		StopLossPercent:    stopLossPercent * 100,    // Convertir a % para mostrar
 		TrailingStop:       trailingStop * 100,       // Convertir a % para mostrar
+		// Configuración avanzada
+		MicroScalpTarget:   microScalpTarget * 100,   // Convertir a % para mostrar
+		MaxProfitTarget:    maxProfitTarget * 100,    // Convertir a % para mostrar
+		MicroStopLoss:      microStopLoss * 100,      // Convertir a % para mostrar
 	}
 
 	return DashboardData{

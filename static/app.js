@@ -349,6 +349,11 @@ function updateConfig(config) {
         document.getElementById('normalProfitTarget').value = config.normalProfitTarget.toFixed(2);
         document.getElementById('stopLossPercent').value = config.stopLossPercent.toFixed(2);
         document.getElementById('trailingStop').value = config.trailingStop.toFixed(2);
+
+        // Update form inputs - Advanced Configuration (ya vienen en %)
+        document.getElementById('microScalpTarget').value = config.microScalpTarget.toFixed(2);
+        document.getElementById('maxProfitTarget').value = config.maxProfitTarget.toFixed(2);
+        document.getElementById('microStopLoss').value = config.microStopLoss.toFixed(2);
     }
 
     // Update bot status (siempre actualizar, no depende de inputs)
@@ -400,7 +405,11 @@ function saveConfig() {
         quickProfitTarget: parseFloat(document.getElementById('quickProfitTarget').value),
         normalProfitTarget: parseFloat(document.getElementById('normalProfitTarget').value),
         stopLossPercent: parseFloat(document.getElementById('stopLossPercent').value),
-        trailingStop: parseFloat(document.getElementById('trailingStop').value)
+        trailingStop: parseFloat(document.getElementById('trailingStop').value),
+        // Advanced configuration
+        microScalpTarget: parseFloat(document.getElementById('microScalpTarget').value),
+        maxProfitTarget: parseFloat(document.getElementById('maxProfitTarget').value),
+        microStopLoss: parseFloat(document.getElementById('microStopLoss').value)
     };
 
     console.log('💾 Guardando configuración:', { ...config, userSecretKey: '***' }); // No loggear la secret key
@@ -430,6 +439,20 @@ function saveConfig() {
         alert('El target normal debe ser mayor que el target rápido');
         isEditingConfig = false;
         return;
+    }
+
+    // Validate - Advanced Configuration
+    if (config.microScalpTarget < 0.1 || config.maxProfitTarget < 0.5 || config.microStopLoss < 0.05) {
+        alert('Los valores avanzados deben estar dentro de los rangos permitidos');
+        isEditingConfig = false;
+        return;
+    }
+
+    if (config.microScalpTarget < 0.25) {
+        if (!confirm('⚠️ ADVERTENCIA: Un Micro Scalp Target menor a 0.25% puede no cubrir las comisiones de Binance (0.20%).\n\n¿Estás seguro de continuar?')) {
+            isEditingConfig = false;
+            return;
+        }
     }
 
     // Send to server
@@ -476,6 +499,33 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+// Toggle advanced configuration panel
+function toggleAdvancedConfig() {
+    const panel = document.getElementById('advancedConfigPanel');
+    const icon = document.getElementById('advancedToggleIcon');
+
+    if (panel.classList.contains('hidden')) {
+        panel.classList.remove('hidden');
+        icon.textContent = '▼';
+    } else {
+        panel.classList.add('hidden');
+        icon.textContent = '▶';
+    }
+}
+
+// Reset advanced configuration to defaults
+function resetAdvancedToDefaults() {
+    if (confirm('¿Restaurar los valores avanzados a sus valores por defecto optimizados?')) {
+        document.getElementById('microScalpTarget').value = '0.30';
+        document.getElementById('maxProfitTarget').value = '1.30';
+        document.getElementById('microStopLoss').value = '0.10';
+
+        isEditingConfig = true;
+
+        alert('✅ Valores restaurados. Haz clic en "Guardar Configuración" para aplicar los cambios.');
+    }
+}
+
 // Detect when user starts editing config inputs
 function setupConfigEditDetection() {
     const configInputs = [
@@ -489,7 +539,10 @@ function setupConfigEditDetection() {
         'quickProfitTarget',
         'normalProfitTarget',
         'stopLossPercent',
-        'trailingStop'
+        'trailingStop',
+        'microScalpTarget',
+        'maxProfitTarget',
+        'microStopLoss'
     ];
 
     configInputs.forEach(inputId => {

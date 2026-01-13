@@ -32,22 +32,21 @@ const (
 	prodStream = "wss://stream.binance.com:9443/ws"
 	
 	// ==================== ESTRATEGIA HFT PRO - AJUSTADA A COMISIONES ====================
-	
+
 	// COMISIONES BINANCE (0.10% por operación = 0.20% ida y vuelta SIN BNB)
 	commissionPerTrade = 0.001  // 0.10% por operación (compra o venta)
 	commissionRoundTrip = 0.002 // 0.20% ciclo completo (compra + venta)
-	
-	// TARGETS AJUSTADOS - YA INCLUYEN MARGEN PARA COMISIONES
-	// Ganancia BRUTA = target, Ganancia NETA = target - 0.20%
-	microScalpTarget   = 0.003  // 0.30% bruto → 0.10% neto real
-	maxProfitTarget    = 0.013  // 1.30% bruto → 1.10% neto real
 
 	// DEFAULTS CONFIGURABLES (se pueden cambiar desde web)
 	defaultQuickProfitTarget  = 0.004  // 0.40% bruto → 0.20% neto real
 	defaultNormalProfitTarget = 0.007  // 0.70% bruto → 0.50% neto real
-	defaultMicroStopLoss      = 0.001  // 0.10% bruto → 0.30% pérdida REAL
 	defaultStopLossPercent    = 0.003  // 0.30% bruto → 0.50% pérdida REAL
 	defaultTrailingStop       = 0.001  // 0.10% bruto → 0.30% pérdida REAL
+
+	// DEFAULTS AVANZADOS (configuración avanzada desde web)
+	defaultMicroScalpTarget = 0.003  // 0.30% bruto → 0.10% neto real
+	defaultMaxProfitTarget  = 0.013  // 1.30% bruto → 1.10% neto real
+	defaultMicroStopLoss    = 0.001  // 0.10% bruto → 0.30% pérdida REAL
 	
 	// GESTIÓN DE CAPITAL PRO (valores por defecto, se configuran al inicio)
 	defaultMinInvestUSDT   = 11.0  // Inversión mínima por defecto
@@ -116,9 +115,13 @@ var (
 	// Targets y Stop Loss configurables (porcentajes)
 	quickProfitTarget  = defaultQuickProfitTarget  // 0.40% bruto → 0.20% neto
 	normalProfitTarget = defaultNormalProfitTarget // 0.70% bruto → 0.50% neto
-	microStopLoss      = defaultMicroStopLoss      // 0.10% bruto
 	stopLossPercent    = defaultStopLossPercent    // 0.30% bruto
 	trailingStop       = defaultTrailingStop       // 0.10% bruto
+
+	// Configuración avanzada (porcentajes)
+	microScalpTarget = defaultMicroScalpTarget // 0.30% bruto → 0.10% neto
+	maxProfitTarget  = defaultMaxProfitTarget  // 1.30% bruto → 1.10% neto
+	microStopLoss    = defaultMicroStopLoss    // 0.10% bruto
 )
 
 // ============================================================================

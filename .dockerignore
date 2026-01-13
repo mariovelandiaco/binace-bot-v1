@@ -1,0 +1,26 @@
+# Git
+.git
+.gitignore
+
+# Archivos de desarrollo
+*.md
+LICENSE
+
+# Archivos temporales
+tmp/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Archivos de OS
+.DS_Store
+Thumbs.db
+
+# Binarios locales
+main
+agent-binance
