@@ -92,8 +92,9 @@ const (
 	// WORKER POOL (Auto-scaling)
 	minWorkers    = 5    // Workers mínimos
 	maxWorkers    = 50   // Workers máximos
-	signalBuffer  = 500  // Buffer de señales ampliado
-	
+	signalBuffer  = 2000 // Buffer de señales ampliado (híbrido)
+	maxDirectAnalysis = 50  // Máximo análisis directo concurrentes
+
 	// AUTO-SCALING THRESHOLDS
 	scaleUpThreshold   = 0.7  // 70% de cola llena = agregar workers
 	scaleDownThreshold = 0.2  // 20% de cola = reducir workers
@@ -312,7 +313,8 @@ var (
 	// HFT Channels para procesamiento paralelo
 	tradeJobsChan     chan TradeJob
 	urgentSignalsChan chan TradeJob
-	
+	directAnalysisSem chan struct{}  // Semáforo para limitar análisis directo
+
 	// Auto-scaling de workers
 	currentWorkers    int32          // Número actual de workers
 	workerWaitGroup   sync.WaitGroup // Para controlar workers
@@ -327,6 +329,7 @@ var (
 	latencyMutex    sync.Mutex
 	jobsProcessed   int64  // Jobs procesados para métricas
 	jobsQueued      int64  // Jobs en cola
+	directAnalysisActive int32  // Análisis directo activos (atómico)
 	
 	// Cache de indicadores para velocidad
 	indicatorCache     = make(map[string]*TechnicalIndicators)
@@ -1073,12 +1076,23 @@ func startPriceStream(symbol string) {
 				}
 			}
 			
-			// Análisis estándar (en paralelo)
+			// Análisis estándar (en paralelo) - Sistema Híbrido
 			select {
 			case tradeJobsChan <- TradeJob{Symbol: symbol, Price: price}:
+				// Enviado al worker pool (opción preferida)
+			case directAnalysisSem <- struct{}{}:
+				// Canal lleno, usar análisis directo con semáforo (limitado)
+				go func() {
+					defer func() {
+						<-directAnalysisSem
+						atomic.AddInt32(&directAnalysisActive, -1)
+					}()
+					atomic.AddInt32(&directAnalysisActive, 1)
+					analyzeTrendAndTrade(symbol)
+				}()
 			default:
-				// Buffer lleno, procesar directo
-				go analyzeTrendAndTrade(symbol)
+				// Ambos canales llenos, descartar tick (llegará otro pronto)
+				// Esto previene leak de goroutinas
 			}
 		}
 		
@@ -1165,6 +1179,7 @@ func initHFTSystem() {
 	// Crear canales de alta velocidad
 	tradeJobsChan = make(chan TradeJob, signalBuffer)
 	urgentSignalsChan = make(chan TradeJob, 100)
+	directAnalysisSem = make(chan struct{}, maxDirectAnalysis)
 	workerStopChans = make([]chan struct{}, 0, maxWorkers)
 	
 	// Iniciar workers mínimos
@@ -1178,7 +1193,8 @@ func initHFTSystem() {
 	// Iniciar auto-scaler
 	go autoScaler()
 	
-	logMsg(fmt.Sprintf("⚡ Sistema HFT con Auto-Scaling iniciado: %d-%d workers", minWorkers, maxWorkers))
+	logMsg(fmt.Sprintf("⚡ Sistema HFT Híbrido iniciado: %d-%d workers + %d análisis directo | Buffer: %d",
+		minWorkers, maxWorkers, maxDirectAnalysis, signalBuffer))
 }
 
 func spawnWorker() {

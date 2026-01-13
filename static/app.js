@@ -102,6 +102,7 @@ function updateStats(stats) {
     document.getElementById('avgLatency').textContent = stats.avgLatency + 'ms';
 
     document.getElementById('workers').textContent = stats.workers + '/' + stats.maxWorkers;
+    document.getElementById('directAnalysis').textContent = stats.directAnalysisActive + '/50';
     document.getElementById('queue').textContent = stats.queueLength + '/' + stats.queueCapacity;
     document.getElementById('jobsProcessed').textContent = stats.jobsProcessed;
     document.getElementById('uptime').textContent = stats.uptime;
@@ -285,6 +286,9 @@ function closeSummaryModal() {
     const modal = document.getElementById('summaryModal');
     modal.classList.add('hidden');
     modal.classList.remove('flex');
+
+    // Notificar al servidor que el modal fue cerrado
+    sendCommand('dismissSummary');
 }
 
 // Send command to server
@@ -305,6 +309,15 @@ function closeAllTrades() {
 function closeProfitTrades() {
     if (confirm('¿Cerrar solo las posiciones con ganancia?')) {
         sendCommand('closeProfit');
+    }
+}
+
+// Reset bot completely
+function resetBot() {
+    if (confirm('⚠️ ADVERTENCIA: Esto resetará TODAS las estadísticas, cerrará posiciones y reiniciará el bot desde cero.\n\n¿Estás seguro de continuar?')) {
+        if (confirm('✋ ÚLTIMA CONFIRMACIÓN: Esta acción NO se puede deshacer.\n\n¿Proceder con el reset completo?')) {
+            sendCommand('reset');
+        }
     }
 }
 

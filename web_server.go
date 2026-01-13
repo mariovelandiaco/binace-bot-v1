@@ -79,6 +79,7 @@ type StatsData struct {
 	QueueLength          int     `json:"queueLength"`
 	QueueCapacity        int     `json:"queueCapacity"`
 	JobsProcessed        int64   `json:"jobsProcessed"`
+	DirectAnalysisActive int32   `json:"directAnalysisActive"`
 	Uptime               string  `json:"uptime"`
 	MinVolatility        float64 `json:"minVolatility"`
 }
@@ -199,6 +200,10 @@ func handleCommand(cmd map[string]interface{}) {
 		handleStart()
 	case "stop":
 		handleStop()
+	case "dismissSummary":
+		handleDismissSummary()
+	case "reset":
+		handleReset()
 	}
 }
 
@@ -310,6 +315,118 @@ func handleStop() {
 	logMsg("⏸️  Bot detenido desde web")
 }
 
+// Manejar descarte del resumen de cierre
+func handleDismissSummary() {
+	summaryModalMutex.Lock()
+	showSummaryModal = false
+	summaryModalMutex.Unlock()
+
+	logMsg("✅ Resumen de cierre descartado")
+}
+
+// Manejar reset completo del bot
+func handleReset() {
+	logMsg("🔄 Iniciando reset completo del bot...")
+
+	// Detener el bot si está corriendo
+	botRunningMutex.Lock()
+	wasRunning := botRunning
+	botRunning = false
+	botRunningMutex.Unlock()
+
+	if wasRunning {
+		logMsg("⏸️  Bot detenido para reset")
+		time.Sleep(500 * time.Millisecond) // Dar tiempo a que terminen operaciones
+	}
+
+	// Cerrar todas las posiciones abiertas
+	positionsMutex.RLock()
+	hasPositions := len(positions) > 0
+	positionsMutex.RUnlock()
+
+	if hasPositions {
+		logMsg("📤 Cerrando posiciones abiertas...")
+		closeAllTrades(false) // Cerrar todas sin filtro
+		time.Sleep(1 * time.Second) // Esperar a que se cierren
+	}
+
+	// Resetear estadísticas de trading
+	profitMutex.Lock()
+	totalProfit = 0
+	totalTrades = 0
+	winningTrades = 0
+	losingTrades = 0
+	totalGains = 0
+	totalLosses = 0
+	totalCommissions = 0
+	profitMutex.Unlock()
+
+	// Resetear métricas de performance
+	latencyMutex.Lock()
+	totalLatency = 0
+	latencyCount = 0
+	latencyMutex.Unlock()
+
+	atomic.StoreInt64(&jobsProcessed, 0)
+	atomic.StoreInt32(&directAnalysisActive, 0)
+
+	// Limpiar resumen de cierre
+	closeSummaryMutex.Lock()
+	lastCloseSummary = nil
+	closeSummaryMutex.Unlock()
+
+	summaryModalMutex.Lock()
+	showSummaryModal = false
+	summaryModalMutex.Unlock()
+
+	// Limpiar señales y estados de pares
+	statusesMutex.Lock()
+	for symbol := range pairStatuses {
+		if status := pairStatuses[symbol]; status != nil {
+			status.Signal = &TradeSignal{Action: "HOLD"}
+			if status.PriceHistory != nil {
+				status.PriceHistory.mutex.Lock()
+				status.PriceHistory.Prices = nil
+				status.PriceHistory.Times = nil
+				status.PriceHistory.Volumes = nil
+				status.PriceHistory.mutex.Unlock()
+			}
+		}
+	}
+	statusesMutex.Unlock()
+
+	// Limpiar cache de indicadores
+	indicatorCacheMux.Lock()
+	indicatorCache = make(map[string]*TechnicalIndicators)
+	indicatorCacheTime = make(map[string]time.Time)
+	indicatorCacheMux.Unlock()
+
+	// Actualizar balance desde Binance
+	logMsg("🔄 Actualizando balance desde Binance...")
+	err := getAccountBalance()
+	if err != nil {
+		logMsg(fmt.Sprintf("⚠️  Error obteniendo balance: %v", err))
+	}
+
+	// Resetear balance inicial al actual
+	balanceMutex.Lock()
+	initialBalance = usdtBalance
+	balanceMutex.Unlock()
+
+	// Resetear tiempo de inicio
+	botStartTime = time.Now()
+
+	// Limpiar logs antiguos
+	logMutex.Lock()
+	logMessages = []string{}
+	logMutex.Unlock()
+
+	logMsg("✅ Reset completado exitosamente")
+	logMsg(fmt.Sprintf("💰 Balance inicial reseteado a: %.2f USDT", initialBalance))
+	logMsg("📊 Todas las estadísticas han sido reiniciadas")
+	logMsg("🎯 El bot está listo para operar desde cero")
+}
+
 // Funciones helper para formateo
 func formatFloat(val float64) string {
 	return fmt.Sprintf("%.2f", val)
@@ -416,6 +533,7 @@ func collectDashboardData() DashboardData {
 		QueueLength:          queueLen,
 		QueueCapacity:        queueCap,
 		JobsProcessed:        processed,
+		DirectAnalysisActive: atomic.LoadInt32(&directAnalysisActive),
 		Uptime:               uptime,
 		MinVolatility:        minVolatility * 100,
 	}
@@ -504,10 +622,14 @@ func collectDashboardData() DashboardData {
 	}
 	logMutex.Unlock()
 
-	// Close Summary
+	// Close Summary - Solo enviar si showSummaryModal es true
 	var closeSummary *CloseSummaryData
+	summaryModalMutex.Lock()
+	shouldShowModal := showSummaryModal
+	summaryModalMutex.Unlock()
+
 	closeSummaryMutex.RLock()
-	if lastCloseSummary != nil {
+	if lastCloseSummary != nil && shouldShowModal {
 		closeSummary = &CloseSummaryData{
 			Timestamp:    lastCloseSummary.Timestamp,
 			FinalBalance: lastCloseSummary.FinalBalance,
